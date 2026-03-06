@@ -48,18 +48,288 @@ function authenticateToken(req, res, next) {
   try {
     req.user = jwt.verify(token, JWT_SECRET);
     return next();
-  } catch (error) {
+  } catch (_error) {
     return res.status(401).json({ message: 'Invalid or expired token' });
   }
+}
+
+function mapRecipePayload(input) {
+  const title = typeof input.title === 'string' ? input.title.trim() : '';
+  const category = typeof input.category === 'string' ? input.category.trim() : null;
+  const sourceType = input.source_type === 'external' ? 'external' : 'manual';
+  const externalId = typeof input.external_id === 'string' ? input.external_id.trim() : null;
+  const imageUrl = typeof input.image_url === 'string' ? input.image_url.trim() : null;
+  const sourceUrl = typeof input.source_url === 'string' ? input.source_url.trim() : null;
+
+  let content = typeof input.content === 'string' ? input.content.trim() : '';
+
+  if (!content && sourceType === 'external') {
+    content = 'Imported from external source';
+  }
+
+  return {
+    title,
+    content,
+    category: category || null,
+    source_type: sourceType,
+    external_id: externalId || null,
+    image_url: imageUrl || null,
+    source_url: sourceUrl || null
+  };
+}
+
+async function listRecipes({ category, sourceType, userId }) {
+  let sql = `
+    SELECT
+      posts.id,
+      posts.user_id,
+      posts.title,
+      posts.content,
+      posts.category,
+      posts.source_type,
+      posts.external_id,
+      posts.image_url,
+      posts.source_url,
+      posts.created_at,
+      posts.updated_at,
+      users.name AS author
+    FROM posts
+    JOIN users ON posts.user_id = users.id
+  `;
+
+  const params = [];
+  const where = [];
+
+  if (category) {
+    where.push('posts.category = ?');
+    params.push(category);
+  }
+
+  if (sourceType && (sourceType === 'manual' || sourceType === 'external')) {
+    where.push('posts.source_type = ?');
+    params.push(sourceType);
+  }
+
+  if (Number.isInteger(userId)) {
+    where.push('posts.user_id = ?');
+    params.push(userId);
+  }
+
+  if (where.length > 0) {
+    sql += ` WHERE ${where.join(' AND ')}`;
+  }
+
+  sql += ' ORDER BY posts.created_at DESC';
+
+  const [rows] = await db.execute(sql, params);
+  return rows;
+}
+
+async function getRecipeById(id) {
+  const [rows] = await db.execute(
+    `
+    SELECT
+      posts.id,
+      posts.user_id,
+      posts.title,
+      posts.content,
+      posts.category,
+      posts.source_type,
+      posts.external_id,
+      posts.image_url,
+      posts.source_url,
+      posts.created_at,
+      posts.updated_at,
+      users.name AS author
+    FROM posts
+    JOIN users ON posts.user_id = users.id
+    WHERE posts.id = ?
+    `,
+    [id]
+  );
+
+  return rows[0] || null;
+}
+
+async function createRecipe(userId, payload) {
+  const [result] = await db.execute(
+    `
+    INSERT INTO posts
+      (user_id, title, content, category, source_type, external_id, image_url, source_url)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+    `,
+    [
+      userId,
+      payload.title,
+      payload.content,
+      payload.category,
+      payload.source_type,
+      payload.external_id,
+      payload.image_url,
+      payload.source_url
+    ]
+  );
+
+  return {
+    id: result.insertId,
+    user_id: userId,
+    ...payload
+  };
+}
+
+async function updateRecipe(recipeId, userId, payload) {
+  const [result] = await db.execute(
+    `
+    UPDATE posts
+    SET
+      title = ?,
+      content = ?,
+      category = ?,
+      source_type = ?,
+      external_id = ?,
+      image_url = ?,
+      source_url = ?,
+      updated_at = CURRENT_TIMESTAMP
+    WHERE id = ? AND user_id = ?
+    `,
+    [
+      payload.title,
+      payload.content,
+      payload.category,
+      payload.source_type,
+      payload.external_id,
+      payload.image_url,
+      payload.source_url,
+      recipeId,
+      userId
+    ]
+  );
+
+  return result.affectedRows > 0;
+}
+
+async function removeRecipe(recipeId, userId) {
+  const [result] = await db.execute('DELETE FROM posts WHERE id = ? AND user_id = ?', [recipeId, userId]);
+  return result.affectedRows > 0;
+}
+
+function registerRecipeCrud(basePath) {
+  app.get(basePath, async (req, res) => {
+    try {
+      const rows = await listRecipes({
+        category: req.query.category,
+        sourceType: req.query.source_type,
+        userId: null
+      });
+
+      return res.json(rows);
+    } catch (error) {
+      console.error(`Error during GET ${basePath}:`, error);
+      return res.status(500).json({ message: 'Failed to fetch recipes' });
+    }
+  });
+
+  app.get(`${basePath}/mine`, authenticateToken, async (req, res) => {
+    try {
+      const rows = await listRecipes({
+        category: req.query.category,
+        sourceType: req.query.source_type,
+        userId: req.user.id
+      });
+
+      return res.json(rows);
+    } catch (error) {
+      console.error(`Error during GET ${basePath}/mine:`, error);
+      return res.status(500).json({ message: 'Failed to fetch own recipes' });
+    }
+  });
+
+  app.get(`${basePath}/:id`, async (req, res) => {
+    try {
+      const recipe = await getRecipeById(req.params.id);
+
+      if (!recipe) {
+        return res.status(404).json({ message: 'Recipe not found' });
+      }
+
+      return res.json(recipe);
+    } catch (error) {
+      console.error(`Error during GET ${basePath}/:id:`, error);
+      return res.status(500).json({ message: 'Failed to fetch recipe' });
+    }
+  });
+
+  app.post(basePath, authenticateToken, async (req, res) => {
+    try {
+      const payload = mapRecipePayload(req.body);
+
+      if (!payload.title || !payload.content) {
+        return res.status(400).json({ message: 'title and content are required' });
+      }
+
+      if (payload.source_type === 'external' && payload.external_id) {
+        const [existing] = await db.execute(
+          'SELECT id FROM posts WHERE user_id = ? AND source_type = "external" AND external_id = ?',
+          [req.user.id, payload.external_id]
+        );
+
+        if (existing.length > 0) {
+          return res.status(409).json({ message: 'This external recipe is already saved' });
+        }
+      }
+
+      const created = await createRecipe(req.user.id, payload);
+      return res.status(201).json(created);
+    } catch (error) {
+      console.error(`Error during POST ${basePath}:`, error);
+      return res.status(500).json({ message: 'Failed to create recipe' });
+    }
+  });
+
+  app.put(`${basePath}/:id`, authenticateToken, async (req, res) => {
+    try {
+      const payload = mapRecipePayload(req.body);
+
+      if (!payload.title || !payload.content) {
+        return res.status(400).json({ message: 'title and content are required' });
+      }
+
+      const updated = await updateRecipe(req.params.id, req.user.id, payload);
+
+      if (!updated) {
+        return res.status(404).json({ message: 'Recipe not found or not owned by current user' });
+      }
+
+      return res.json({ id: Number(req.params.id), user_id: req.user.id, ...payload });
+    } catch (error) {
+      console.error(`Error during PUT ${basePath}/:id:`, error);
+      return res.status(500).json({ message: 'Failed to update recipe' });
+    }
+  });
+
+  app.delete(`${basePath}/:id`, authenticateToken, async (req, res) => {
+    try {
+      const deleted = await removeRecipe(req.params.id, req.user.id);
+
+      if (!deleted) {
+        return res.status(404).json({ message: 'Recipe not found or not owned by current user' });
+      }
+
+      return res.json({ message: 'Recipe deleted successfully' });
+    } catch (error) {
+      console.error(`Error during DELETE ${basePath}/:id:`, error);
+      return res.status(500).json({ message: 'Failed to delete recipe' });
+    }
+  });
 }
 
 app.get('/health', async (_req, res) => {
   try {
     await db.query('SELECT 1');
-    res.json({ status: 'OK', message: 'Taste Journal API is running' });
+    return res.json({ status: 'OK', message: 'Taste Journal API is running' });
   } catch (error) {
     console.error('Health check failed:', error);
-    res.status(500).json({ status: 'ERROR', message: 'Database connection failed' });
+    return res.status(500).json({ status: 'ERROR', message: 'Database connection failed' });
   }
 });
 
@@ -149,74 +419,6 @@ app.post('/auth/logout', authenticateToken, (_req, res) => {
   return res.json({ message: 'Logged out successfully. Remove token on the client.' });
 });
 
-app.get('/posts', async (req, res) => {
-  try {
-    const { category } = req.query;
-
-    let sql = `
-      SELECT
-        posts.id,
-        posts.user_id,
-        posts.title,
-        posts.content,
-        posts.category,
-        posts.created_at,
-        posts.updated_at,
-        users.name AS author
-      FROM posts
-      JOIN users ON posts.user_id = users.id
-    `;
-
-    const params = [];
-
-    if (category) {
-      sql += ' WHERE posts.category = ?';
-      params.push(category);
-    }
-
-    sql += ' ORDER BY posts.created_at DESC';
-
-    const [rows] = await db.execute(sql, params);
-    return res.json(rows);
-  } catch (error) {
-    console.error('Error during GET /posts:', error);
-    return res.status(500).json({ message: 'Failed to fetch posts' });
-  }
-});
-
-app.get('/posts/:id', async (req, res) => {
-  try {
-    const { id } = req.params;
-
-    const [rows] = await db.execute(
-      `
-      SELECT
-        posts.id,
-        posts.user_id,
-        posts.title,
-        posts.content,
-        posts.category,
-        posts.created_at,
-        posts.updated_at,
-        users.name AS author
-      FROM posts
-      JOIN users ON posts.user_id = users.id
-      WHERE posts.id = ?
-      `,
-      [id]
-    );
-
-    if (rows.length === 0) {
-      return res.status(404).json({ message: 'Post not found' });
-    }
-
-    return res.json(rows[0]);
-  } catch (error) {
-    console.error('Error during GET /posts/:id:', error);
-    return res.status(500).json({ message: 'Failed to fetch post' });
-  }
-});
-
 app.get('/categories', async (_req, res) => {
   try {
     const [rows] = await db.execute(
@@ -230,87 +432,8 @@ app.get('/categories', async (_req, res) => {
   }
 });
 
-app.post('/posts', authenticateToken, async (req, res) => {
-  try {
-    const { title, content, category } = req.body;
-
-    if (!title || !content) {
-      return res.status(400).json({ message: 'title and content are required' });
-    }
-
-    const normalizedCategory = typeof category === 'string' ? category.trim() : null;
-
-    const [result] = await db.execute(
-      'INSERT INTO posts (user_id, title, content, category) VALUES (?, ?, ?, ?)',
-      [req.user.id, title.trim(), content, normalizedCategory || null]
-    );
-
-    return res.status(201).json({
-      id: result.insertId,
-      user_id: req.user.id,
-      title: title.trim(),
-      content,
-      category: normalizedCategory || null
-    });
-  } catch (error) {
-    console.error('Error during POST /posts:', error);
-    return res.status(500).json({ message: 'Failed to create post' });
-  }
-});
-
-app.put('/posts/:id', authenticateToken, async (req, res) => {
-  try {
-    const { id } = req.params;
-    const { title, content, category } = req.body;
-
-    if (!title || !content) {
-      return res.status(400).json({ message: 'title and content are required' });
-    }
-
-    const normalizedCategory = typeof category === 'string' ? category.trim() : null;
-
-    const [result] = await db.execute(
-      `
-      UPDATE posts
-      SET title = ?, content = ?, category = ?, updated_at = CURRENT_TIMESTAMP
-      WHERE id = ? AND user_id = ?
-      `,
-      [title.trim(), content, normalizedCategory || null, id, req.user.id]
-    );
-
-    if (result.affectedRows === 0) {
-      return res.status(404).json({ message: 'Post not found or not owned by current user' });
-    }
-
-    return res.json({
-      id: Number(id),
-      user_id: req.user.id,
-      title: title.trim(),
-      content,
-      category: normalizedCategory || null
-    });
-  } catch (error) {
-    console.error('Error during PUT /posts/:id:', error);
-    return res.status(500).json({ message: 'Failed to update post' });
-  }
-});
-
-app.delete('/posts/:id', authenticateToken, async (req, res) => {
-  try {
-    const { id } = req.params;
-
-    const [result] = await db.execute('DELETE FROM posts WHERE id = ? AND user_id = ?', [id, req.user.id]);
-
-    if (result.affectedRows === 0) {
-      return res.status(404).json({ message: 'Post not found or not owned by current user' });
-    }
-
-    return res.json({ message: 'Post deleted successfully' });
-  } catch (error) {
-    console.error('Error during DELETE /posts/:id:', error);
-    return res.status(500).json({ message: 'Failed to delete post' });
-  }
-});
+registerRecipeCrud('/recipes');
+registerRecipeCrud('/posts');
 
 app.use((err, _req, res, _next) => {
   console.error('Unhandled error:', err);
