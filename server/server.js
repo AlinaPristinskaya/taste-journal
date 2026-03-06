@@ -4,6 +4,10 @@ import dotenv from 'dotenv';
 import cors from 'cors';
 import bcrypt from 'bcryptjs';
 import jwt from 'jsonwebtoken';
+import multer from 'multer';
+import fs from 'fs';
+import path from 'path';
+import { fileURLToPath } from 'url';
 
 dotenv.config();
 
@@ -13,6 +17,37 @@ app.use(express.json());
 
 const PORT = Number(process.env.PORT) || 3001;
 const JWT_SECRET = process.env.JWT_SECRET || 'dev_secret_change_me';
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
+const uploadsDir = path.join(__dirname, 'uploads');
+
+if (!fs.existsSync(uploadsDir)) {
+  fs.mkdirSync(uploadsDir, { recursive: true });
+}
+
+app.use('/uploads', express.static(uploadsDir));
+
+const storage = multer.diskStorage({
+  destination: (_req, _file, cb) => cb(null, uploadsDir),
+  filename: (_req, file, cb) => {
+    const extension = path.extname(file.originalname) || '.jpg';
+    cb(null, `${Date.now()}-${Math.round(Math.random() * 1e9)}${extension}`);
+  }
+});
+
+const upload = multer({
+  storage,
+  limits: {
+    fileSize: 5 * 1024 * 1024
+  },
+  fileFilter: (_req, file, cb) => {
+    if (file.mimetype.startsWith('image/')) {
+      cb(null, true);
+      return;
+    }
+    cb(new Error('Only image files are allowed'));
+  }
+});
 
 const db = mysql.createPool({
   host: process.env.DB_HOST,
@@ -419,6 +454,19 @@ app.post('/auth/logout', authenticateToken, (_req, res) => {
   return res.json({ message: 'Logged out successfully. Remove token on the client.' });
 });
 
+app.post('/upload-image', authenticateToken, upload.single('image'), (req, res) => {
+  if (!req.file) {
+    return res.status(400).json({ message: 'Image file is required' });
+  }
+
+  const baseUrl = `${req.protocol}://${req.get('host')}`;
+  const imageUrl = `${baseUrl}/uploads/${req.file.filename}`;
+
+  return res.status(201).json({
+    image_url: imageUrl
+  });
+});
+
 app.get('/categories', async (_req, res) => {
   try {
     const [rows] = await db.execute(
@@ -436,6 +484,17 @@ registerRecipeCrud('/recipes');
 registerRecipeCrud('/posts');
 
 app.use((err, _req, res, _next) => {
+  if (err instanceof multer.MulterError) {
+    if (err.code === 'LIMIT_FILE_SIZE') {
+      return res.status(400).json({ message: 'Image is too large. Max size is 5MB.' });
+    }
+    return res.status(400).json({ message: err.message });
+  }
+
+  if (err?.message === 'Only image files are allowed') {
+    return res.status(400).json({ message: err.message });
+  }
+
   console.error('Unhandled error:', err);
   return res.status(500).json({ message: 'Internal server error' });
 });
