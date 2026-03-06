@@ -306,8 +306,8 @@ function registerRecipeCrud(basePath) {
 
       if (payload.source_type === 'external' && payload.external_id) {
         const [existing] = await db.execute(
-          'SELECT id FROM posts WHERE user_id = ? AND source_type = "external" AND external_id = ?',
-          [req.user.id, payload.external_id]
+          'SELECT id FROM posts WHERE user_id = ? AND source_type = ? AND external_id = ?',
+          [req.user.id, 'external', payload.external_id]
         );
 
         if (existing.length > 0) {
