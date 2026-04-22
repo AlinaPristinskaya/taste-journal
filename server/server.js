@@ -366,7 +366,24 @@ app.get('/health', async (_req, res) => {
     return res.json({ status: 'OK', message: 'Taste Journal API is running' });
   } catch (error) {
     console.error('Health check failed:', error);
-    return res.status(500).json({ status: 'ERROR', message: 'Database connection failed' });
+    return res.status(500).json({
+      status: 'ERROR',
+      message: 'Database connection failed',
+      error: {
+        code: error?.code,
+        errno: error?.errno,
+        sqlState: error?.sqlState,
+        sqlMessage: error?.sqlMessage
+      },
+      config: {
+        hasHost: Boolean(process.env.DB_HOST),
+        hasUser: Boolean(process.env.DB_USER),
+        hasPassword: Boolean(process.env.DB_PASSWORD),
+        hasDatabase: Boolean(process.env.DB_NAME),
+        port: Number(process.env.DB_PORT) || 3306,
+        ssl: process.env.DB_SSL === 'false' ? 'disabled' : 'enabled'
+      }
+    });
   }
 });
 
